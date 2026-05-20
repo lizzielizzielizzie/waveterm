@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wavetermdev/waveterm/pkg/aiusechat/uctypes"
+	"github.com/wavetermdev/waveterm/pkg/blockcontroller"
 	"github.com/wavetermdev/waveterm/pkg/waveobj"
 	"github.com/wavetermdev/waveterm/pkg/wcore"
 	"github.com/wavetermdev/waveterm/pkg/wshrpc"
@@ -296,6 +297,224 @@ func GetTermCommandOutputToolDefinition(tabId string) uctypes.ToolDefinition {
 				return nil, fmt.Errorf("failed to get command output: %w", err)
 			}
 			return output, nil
+		},
+	}
+}
+
+type TermExecToolInput struct {
+	WidgetId  string `json:"widget_id"`
+	Command   string `json:"command"`
+	TimeoutMs *int   `json:"timeout_ms,omitempty"`
+}
+
+type TermExecToolOutput struct {
+	WidgetId       string       `json:"widget_id"`
+	Command        string       `json:"command"`
+	ExitCode       int          `json:"exitcode"`
+	DurationMs     int          `json:"duration_ms"`
+	TotalLines     int          `json:"totallines"`
+	Content        string       `json:"content"`
+	HasMore        bool         `json:"hasmore"`
+	SinceOutputSec *int         `json:"sincelastoutputsec,omitempty"`
+}
+
+func parseTermExecInput(input any) (*TermExecToolInput, error) {
+	const MaxCommandLen = 8192
+
+	result := &TermExecToolInput{}
+
+	if input == nil {
+		return nil, fmt.Errorf("widget_id and command are required")
+	}
+
+	inputBytes, err := json.Marshal(input)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal input: %w", err)
+	}
+
+	if err := json.Unmarshal(inputBytes, result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal input: %w", err)
+	}
+
+	if result.WidgetId == "" {
+		return nil, fmt.Errorf("widget_id is required")
+	}
+
+	if result.Command == "" {
+		return nil, fmt.Errorf("command is required")
+	}
+
+	if len(result.Command) > MaxCommandLen {
+		return nil, fmt.Errorf("command exceeds maximum length of %d characters", MaxCommandLen)
+	}
+
+	return result, nil
+}
+
+func pollForShellState(ctx context.Context, blockORef waveobj.ORef, predicate func(*waveobj.ObjRTInfo) bool, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if time.Now().After(deadline) {
+			return fmt.Errorf("timed out waiting for shell state change")
+		}
+
+		rtInfo := wstore.GetRTInfo(blockORef)
+		if predicate(rtInfo) {
+			return nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func GetTermExecToolDefinition(tabId string) uctypes.ToolDefinition {
+	return uctypes.ToolDefinition{
+		Name:        "term_exec",
+		DisplayName: "Execute Terminal Command",
+		Description: "Execute a shell command in a terminal widget and capture its output. Requires shell integration to be enabled. The terminal must be in a ready state (no command currently running). Returns the command output, exit code, and execution duration.",
+		ToolLogName: "term:exec",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"widget_id": map[string]any{
+					"type":        "string",
+					"description": "8-character widget ID of the terminal widget",
+				},
+				"command": map[string]any{
+					"type":        "string",
+					"description": "Shell command to execute in the terminal",
+				},
+				"timeout_ms": map[string]any{
+					"type":        "integer",
+					"minimum":     1000,
+					"maximum":     120000,
+					"description": "Maximum time to wait for command completion in milliseconds (default: 30000, max: 120000)",
+				},
+			},
+			"required":             []string{"widget_id", "command"},
+			"additionalProperties": false,
+		},
+		ToolCallDesc: func(input any, output any, toolUseData *uctypes.UIMessageDataToolUse) string {
+			parsed, err := parseTermExecInput(input)
+			if err != nil {
+				return fmt.Sprintf("error parsing input: %v", err)
+			}
+			return fmt.Sprintf("executing command in %s: %s", parsed.WidgetId, parsed.Command)
+		},
+		ToolAnyCallback: func(input any, toolUseData *uctypes.UIMessageDataToolUse) (any, error) {
+			parsed, err := parseTermExecInput(input)
+			if err != nil {
+				return nil, err
+			}
+
+			timeoutMs := 30000
+			if parsed.TimeoutMs != nil && *parsed.TimeoutMs > 0 {
+				timeoutMs = min(*parsed.TimeoutMs, 120000)
+			}
+
+			ctx, cancelFn := context.WithTimeout(context.Background(), time.Duration(timeoutMs+10000)*time.Millisecond)
+			defer cancelFn()
+
+			fullBlockId, err := wcore.ResolveBlockIdFromPrefix(ctx, tabId, parsed.WidgetId)
+			if err != nil {
+				return nil, err
+			}
+
+			blockORef := waveobj.MakeORef(waveobj.OType_Block, fullBlockId)
+
+			rtInfo := wstore.GetRTInfo(blockORef)
+			if rtInfo == nil || !rtInfo.ShellIntegration {
+				return nil, fmt.Errorf("shell integration is not enabled for this terminal")
+			}
+
+			if rtInfo.ShellState != "ready" {
+				return nil, fmt.Errorf("terminal is not ready (current state: %q). Wait for any running command to finish", rtInfo.ShellState)
+			}
+
+			preLastCmd := rtInfo.ShellLastCmd
+
+			commandLine := parsed.Command
+			if !strings.HasSuffix(commandLine, "\n") {
+				commandLine += "\n"
+			}
+
+			err = blockcontroller.SendInput(fullBlockId, &blockcontroller.BlockInputUnion{
+				InputData: []byte(commandLine),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to send command to terminal: %w", err)
+			}
+
+			startTime := time.Now()
+
+			commandRan := false
+			startErr := pollForShellState(ctx, blockORef, func(ri *waveobj.ObjRTInfo) bool {
+				if ri == nil {
+					return false
+				}
+				if ri.ShellState == "running-command" {
+					return true
+				}
+				if ri.ShellState == "ready" && ri.ShellLastCmd != "" && ri.ShellLastCmd != preLastCmd {
+					return true
+				}
+				return false
+			}, 5*time.Second)
+
+			if startErr == nil {
+				commandRan = true
+				rtInfo = wstore.GetRTInfo(blockORef)
+				if rtInfo != nil && rtInfo.ShellState == "running-command" {
+					startErr = pollForShellState(ctx, blockORef, func(ri *waveobj.ObjRTInfo) bool {
+						return ri != nil && ri.ShellState == "ready"
+					}, time.Duration(timeoutMs)*time.Millisecond)
+				}
+			}
+
+			if startErr != nil && !commandRan {
+				rtInfo = wstore.GetRTInfo(blockORef)
+				if rtInfo != nil && rtInfo.ShellState == "ready" {
+					return nil, fmt.Errorf("command may not have started: %w", startErr)
+				}
+				return nil, fmt.Errorf("command did not complete in time: %w", startErr)
+			}
+			if startErr != nil && commandRan {
+				return nil, fmt.Errorf("command did not complete in time: %w", startErr)
+			}
+
+			durationMs := int(time.Since(startTime).Milliseconds())
+
+			rtInfo = wstore.GetRTInfo(blockORef)
+			exitCode := 0
+			if rtInfo != nil {
+				exitCode = rtInfo.ShellLastCmdExitCode
+			}
+
+			scrollback, err := getTermScrollbackOutput(
+				tabId,
+				parsed.WidgetId,
+				wshrpc.CommandTermGetScrollbackLinesData{
+					LastCommand: true,
+				},
+			)
+			if err != nil {
+				return nil, fmt.Errorf("command completed but failed to read output: %w", err)
+			}
+
+			return &TermExecToolOutput{
+				WidgetId:       parsed.WidgetId,
+				Command:        parsed.Command,
+				ExitCode:       exitCode,
+				DurationMs:     durationMs,
+				TotalLines:     scrollback.TotalLines,
+				Content:        scrollback.Content,
+				HasMore:        scrollback.HasMore,
+				SinceOutputSec: scrollback.SinceLastOutputSec,
+			}, nil
 		},
 	}
 }

@@ -44,7 +44,7 @@ function Global:_waveterm_si_prompt {
     if ($Global:_WAVETERM_SI_FIRSTPROMPT) {
 		# not sending uname
 		       $shellversion = $PSVersionTable.PSVersion.ToString()
-		       Write-Host -NoNewline "`e]16162;M;{`"shell`":`"pwsh`",`"shellversion`":`"$shellversion`",`"integration`":false}`a"
+		       Write-Host -NoNewline "`e]16162;M;{`"shell`":`"pwsh`",`"shellversion`":`"$shellversion`",`"integration`":true}`a"
         $Global:_WAVETERM_SI_FIRSTPROMPT = $false
     }
     
