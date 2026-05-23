@@ -3,11 +3,12 @@
 
 import { ModalsRenderer } from "@/app/modals/modalsrenderer";
 import { globalStore } from "@/app/store/jotaiStore";
+import { TabModelContext } from "@/app/store/tab-model";
 import { WaveEnvContext } from "@/app/waveenv/waveenv";
 import { makeWaveEnvImpl } from "@/app/waveenv/waveenvimpl";
 import { AppSelectionModal } from "@/builder/app-selection-modal";
 import { BuilderWorkspace } from "@/builder/builder-workspace";
-import { atoms, isDev } from "@/store/global";
+import { atoms, isDev } from "@/store/Global";
 import { appHandleKeyDown } from "@/store/keymodel";
 import * as keyutil from "@/util/keyutil";
 import { isBlank } from "@/util/util";
@@ -70,7 +71,9 @@ export function BuilderApp({ initOpts, onFirstRender }: BuilderAppProps) {
     return (
         <Provider store={globalStore}>
             <WaveEnvContext.Provider value={waveEnvRef.current}>
-                <BuilderAppInner />
+                <TabModelContext.Provider value={undefined}>
+                    <BuilderAppInner />
+                </TabModelContext.Provider>
             </WaveEnvContext.Provider>
         </Provider>
     );
