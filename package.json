@@ -7,7 +7,7 @@
     "productName": "Wave",
     "description": "Open-Source AI-Native Terminal Built for Seamless Workflows",
     "license": "Apache-2.0",
-    "version": "0.14.4",
+    "version": "0.14.5",
     "homepage": "https://waveterm.dev",
     "build": {
         "appId": "dev.commandline.waveterm"
@@ -130,7 +130,7 @@
         "throttle-debounce": "^5.0.2",
         "unist-util-visit": "^5.1.0",
         "use-device-pixel-ratio": "^1.1.2",
-        "uuid": "^13.0.0",
+        "uuid": "^14.0.0",
         "winston": "^3.19.0",
         "ws": "^8.19.0",
         "yaml": "^2.8.3"

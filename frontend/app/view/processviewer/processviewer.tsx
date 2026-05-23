@@ -153,7 +153,11 @@ export class ProcessViewerViewModel implements ViewModel {
         const containerHeight = globalStore.get(this.containerHeightAtom);
         const conn = globalStore.get(this.connection);
         const textSearch = globalStore.get(this.textSearchAtom);
+        const connStatus = globalStore.get(this.connStatus);
 
+        if (!connStatus?.connected) {
+            return;
+        }
         const start = Math.max(0, Math.floor(scrollTop / RowHeight) - OverscanRows);
         const visibleRows = containerHeight > 0 ? Math.ceil(containerHeight / RowHeight) : 50;
         const limit = visibleRows + OverscanRows * 2;
@@ -190,6 +194,10 @@ export class ProcessViewerViewModel implements ViewModel {
 
     async doKeepAlive() {
         if (this.disposed) return;
+        const connStatus = globalStore.get(this.connStatus);
+        if (!connStatus?.connected) {
+            return;
+        }
         const conn = globalStore.get(this.connection);
         const route = makeConnRoute(conn);
         try {
@@ -303,6 +311,10 @@ export class ProcessViewerViewModel implements ViewModel {
             this.cancelPoll = null;
             this.startKeepAlive();
         } else {
+            if (this.cancelPoll) {
+                this.cancelPoll();
+            }
+            this.cancelPoll = null;
             this.startPolling();
         }
     }
@@ -462,7 +474,7 @@ const Columns: ColDef[] = [
     { key: "pid", label: "PID", width: "70px", align: "right" },
     { key: "command", label: "Command", width: "minmax(120px, 4fr)" },
     { key: "status", label: "Status", width: "75px", hideOnPlatform: ["windows", "darwin"] },
-    { key: "user", label: "User", width: "80px" },
+    { key: "user", label: "User", width: "80px", hideOnPlatform: ["windows"] },
     { key: "threads", label: "NT", tooltip: "Num Threads", width: "40px", align: "right", hideOnPlatform: ["windows"] },
     { key: "cpu", label: "CPU%", width: "70px", align: "right" },
     { key: "mem", label: "Memory", width: "90px", align: "right" },
@@ -595,9 +607,9 @@ const ProcessRow = React.memo(function ProcessRow({
     onSelect: (pid: number) => void;
     onContextMenu: (pid: number, e: React.MouseEvent) => void;
 }) {
+    const cols = getColumns(platform);
+    const visibleKeys = new Set(cols.map((c) => c.key));
     const gridTemplate = getGridTemplate(platform);
-    const showStatus = platform !== "windows" && platform !== "darwin";
-    const showThreads = platform !== "windows";
     if (proc.gone) {
         return (
             <div
@@ -610,9 +622,9 @@ const ProcessRow = React.memo(function ProcessRow({
                     {proc.pid}
                 </div>
                 <div className="px-2 flex items-center truncate text-muted italic">(gone)</div>
-                {showStatus && <div className="px-2 flex items-center truncate" />}
-                <div className="px-2 flex items-center truncate" />
-                {showThreads && <div className="px-2 flex items-center truncate" />}
+                {visibleKeys.has("status") && <div className="px-2 flex items-center truncate" />}
+                {visibleKeys.has("user") && <div className="px-2 flex items-center truncate" />}
+                {visibleKeys.has("threads") && <div className="px-2 flex items-center truncate" />}
                 <div className="px-2 flex items-center truncate" />
                 <div className="px-2 flex items-center truncate" />
             </div>
@@ -629,11 +641,13 @@ const ProcessRow = React.memo(function ProcessRow({
                 {proc.pid}
             </div>
             <div className="px-2 flex items-center truncate">{proc.command}</div>
-            {showStatus && (
+            {visibleKeys.has("status") && (
                 <div className="px-2 flex items-center truncate text-secondary text-[11px]">{proc.status}</div>
             )}
-            <div className="px-2 flex items-center truncate text-secondary">{proc.user}</div>
-            {showThreads && (
+            {visibleKeys.has("user") && (
+                <div className="px-2 flex items-center truncate text-secondary">{proc.user}</div>
+            )}
+            {visibleKeys.has("threads") && (
                 <div className="px-2 flex items-center truncate justify-end text-secondary font-mono text-[11px]">
                     {proc.numthreads === -1 ? "-" : proc.numthreads >= 1 ? proc.numthreads : ""}
                 </div>
@@ -871,6 +885,7 @@ export const ProcessViewerView: React.FC<ViewComponentProps<ProcessViewerViewMod
         const [selectedPid, setSelectedPid] = jotai.useAtom(model.selectedPidAtom);
         const dataStart = jotai.useAtomValue(model.dataStartAtom);
         const connection = jotai.useAtomValue(model.connection);
+        const connStatus = jotai.useAtomValue(model.connStatus);
         const bodyScrollRef = React.useRef<HTMLDivElement>(null);
         const containerRef = React.useRef<HTMLDivElement>(null);
         const [wide, setWide] = React.useState(false);
@@ -976,33 +991,36 @@ export const ProcessViewerView: React.FC<ViewComponentProps<ProcessViewerViewMod
 
                 {/* outer h-scroll wrapper */}
                 <div className="flex-1 overflow-x-auto overflow-y-hidden">
-                    {/* inner column — expands to header's natural width, rows match */}
-                    <div className="flex flex-col h-full min-w-full w-max">
-                        <TableHeader model={model} sortBy={sortBy} sortDesc={sortDesc} platform={platform} />
-
-                        {/* virtualized rows — same width as header, scrolls vertically */}
-                        <div
-                            ref={bodyScrollRef}
-                            className="flex-1 overflow-y-auto overflow-x-hidden w-full wide-scrollbar"
-                            onScroll={handleScroll}
-                        >
-                            <div style={{ height: totalHeight, position: "relative" }}>
-                                <div style={{ position: "absolute", top: paddingTop, left: 0, right: 0 }}>
-                                    {processes.map((proc) => (
-                                        <ProcessRow
-                                            key={proc.pid}
-                                            proc={proc}
-                                            hasCpu={hasCpu}
-                                            platform={platform}
-                                            selected={selectedPid === proc.pid}
-                                            onSelect={handleSelectPid}
-                                            onContextMenu={handleContextMenu}
-                                        />
-                                    ))}
+                    {!connStatus?.connected ? (
+                        <div className="flex items-center justify-center h-full text-secondary text-sm">
+                            Waiting for connection…
+                        </div>
+                    ) : (
+                        <div className="flex flex-col h-full min-w-full w-max">
+                            <TableHeader model={model} sortBy={sortBy} sortDesc={sortDesc} platform={platform} />
+                            <div
+                                ref={bodyScrollRef}
+                                className="flex-1 overflow-y-auto overflow-x-hidden w-full wide-scrollbar"
+                                onScroll={handleScroll}
+                            >
+                                <div style={{ height: totalHeight, position: "relative" }}>
+                                    <div style={{ position: "absolute", top: paddingTop, left: 0, right: 0 }}>
+                                        {processes.map((proc) => (
+                                            <ProcessRow
+                                                key={proc.pid}
+                                                proc={proc}
+                                                hasCpu={hasCpu}
+                                                platform={platform}
+                                                selected={selectedPid === proc.pid}
+                                                onSelect={handleSelectPid}
+                                                onContextMenu={handleContextMenu}
+                                            />
+                                        ))}
+                                    </div>
                                 </div>
                             </div>
                         </div>
-                    </div>
+                    )}
                 </div>
                 <ActionStatusBar model={model} />
             </div>
